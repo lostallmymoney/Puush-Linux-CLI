@@ -1,214 +1,538 @@
-#!/bin/bash
-# Puush for Linux (https://github.com/jacklul/puush-linux)
-#  by Jack'lul <www.jacklul.com>
-#
-# This script is free software; you can redistribute it and/or
-# modify it under the terms of the GNU Lesser General Public
-# License (LGPL) as published by the Free Software Foundation; either
-# version 2.1 of the License, or (at your option) any later version.
-# 
-# This script is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-# Lesser General Public License for more details.
-# 
-# You should have received a copy of the GNU Lesser General Public
-# License along with this script. If not, see <http://www.gnu.org/licenses/>.
-# 
-##################
+#!/usr/bin/env bash
+# puush - upload screenshots and files to puush.me from GNOME on Wayland
+# Rewrite of puush-linux by Jack'lul (https://github.com/jacklul/puush-linux),
+# itself a rewrite of Sunmock Yang's (https://github.com/sunmockyang/puush-linux).
+# SPDX-License-Identifier: LGPL-2.1-or-later
 
-# Simple function to check if package is installed
-function checkDependency() 
+BIN=~/.local/bin/puush
+ICON=~/.local/share/pixmaps/puush.svg
+CONF=~/.config/puush/puush.conf
+CACHE=~/.cache/puush
+# shellcheck source=/dev/null
+[[ -f $CONF ]] && . "$CONF"
+
+# Checked once here: inside $(...) stdout is never a terminal
+[[ -t 1 ]] && tty=1 || tty=0
+
+# $1: title, $2: message. Shows a desktop notification with the puush logo
+# (GNOME only shows it for a named app).
+notify()
 {
-	if ! which $1 >/dev/null; then
-		if [ -t 1 ] ; then
-			printf "Failed to find required command '$1', check dependencies!\n" "$1"
-		else
-			notify-send "puush error!" "Failed to find required command '$1', check dependencies!" -t 5000 -i "/usr/share/pixmaps/puush.png"
+	command -v notify-send >/dev/null || return 0
+	[[ -s $ICON ]] || writeIcon
+	notify-send -a puush -h string:desktop-entry:puush -i "$ICON" "$1" "$2"
+}
+
+# The puush logo, stored gzipped and base64-encoded in comments at the end of this script
+writeIcon()
+{
+	mkdir -p "${ICON%/*}" && sed '1,/^#ICON$/d; s/^#//' "$0" | base64 -d | gunzip >"$ICON"
+}
+
+# $1: title, $2: message. A failed upload or delete: printed and notified,
+# and puush exits with 1 once it has done what it could.
+fail() { echo "Error: $2" >&2; notify "$1" "$2"; status=1; }
+
+# $1: message. Stops puush; notifies only when there is no terminal to print to.
+die() { if ((tty)); then echo "Error: $1" >&2; else notify "puush" "$1"; fi; exit 1; }
+need() { command -v "$1" >/dev/null || die "Missing '$1'${2:+, install $2}."; }
+
+# $1: a date. Prints it in local time, via a timestamp because date keeps a
+# timezone named in its input (puush.me's are GMT).
+localTime() { [[ -n $1 ]] && { date -d "@$(date -d "$1" +%s)" '+%F %T %Z'; } 2>/dev/null; }
+
+# Takes a screenshot of the whole desktop through GNOME's screenshot portal and
+# prints its path. The portal only replies to callers that stay connected, so
+# the new file is picked up from the Pictures folder instead.
+desktopShot()
+{
+	local dir marker file shot i
+	dir=$(xdg-user-dir PICTURES 2>/dev/null) marker=$(mktemp) || return 1
+	gdbus call --session --dest org.freedesktop.portal.Desktop --object-path /org/freedesktop/portal/desktop \
+		--method org.freedesktop.portal.Screenshot.Screenshot "" "{'interactive': <false>}" >/dev/null &&
+		for ((i = 0; i < 100; i++)); do
+			file=$(find "${dir:-$HOME/Pictures}" -maxdepth 1 -name 'Screenshot*.png' -newer "$marker" -print -quit)
+			# The file appears before it is fully written: wait for the PNG's end chunk
+			[[ -n $file && $(tail -c 8 "$file" | head -c 4) == IEND ]] && shot=$file && break
+			sleep 0.1
+		done
+	rm -f -- "$marker"
+	[[ -n $shot ]] && echo "$shot"
+}
+
+# Opens GNOME's screenshot tool (area, window or screen) and prints the path of
+# the screenshot, or nothing if cancelled. Asked through the portal's GNOME
+# backend, which answers in its reply rather than to a connected caller.
+pickShot()
+{
+	local reply path
+	reply=$(gdbus call --session --timeout 600 --dest org.freedesktop.impl.portal.desktop.gnome \
+		--object-path /org/freedesktop/portal/desktop --method org.freedesktop.impl.portal.Screenshot.Screenshot \
+		"/org/freedesktop/portal/desktop/request/1_0/puush$$" "" "" "{'interactive': <true>}") || return 1
+	# (uint32 0, {'uri': <'file:///...'>}) when taken, another number when cancelled
+	[[ $reply == "(uint32 0, "*"'file://"* ]] || return 0
+	path=${reply#*\'file://}
+	path=${path%%\'*}
+	printf '%b\n' "${path//%/\\x}"
+}
+
+# [-#] endpoint, then curl arguments. Quiet unless -# asks for a progress bar.
+# The key goes through stdin so it never shows in the process list.
+api()
+{
+	local quiet=-sS
+	[[ $1 == -\# ]] && quiet=$1 && shift
+	printf '%s' "$PUUSH_API_KEY" |
+		curl "$quiet" --connect-timeout 15 "https://puush.me/api/$1" -F "k=<-" "${@:2}"
+}
+
+# $1: file. Prints the link, or an error and returns 1.
+upload()
+{
+	[[ -f $1 && -r $1 ]] || { printf "Can't read '%s'." "$1"; return 1; }
+
+	# Quote the name so commas and semicolons survive curl -F
+	local name=${1//\\/\\\\} bar=() checksum=() sum reply attempt
+	name=${name//\"/\\\"}
+	((tty)) && bar=(-#)
+
+	# Lets puush.me reject a corrupted transfer (disable: puush --option md5 false)
+	if [[ $PUUSH_MD5 != false ]]; then
+		read -r sum _ < <(md5sum <"$1")
+		checksum=(-F "c=$sum")
+	fi
+
+	# z is a field the official client always sends
+	for attempt in 1 2; do
+		reply=$(api "${bar[@]}" up -F z=poop "${checksum[@]}" -F "f=@\"$name\"") ||
+			{ printf "Can't reach puush.me."; return 1; }
+
+		# "0,<url>,<id>,<usage>" on success, a negative code on failure
+		case $reply in
+			0,*) reply=${reply#0,}; printf '%s' "${reply%%,*}"; return 0 ;;
+			-1|-1,*) printf "Invalid API key, run 'puush --login'."; return 1 ;;
+		esac
+
+		# Any other error, such as a checksum mismatch, gets one more try
+		# (stdout carries the link here, so the terminal note goes to stderr)
+		if ((attempt == 1)); then
+			echo "puush.me reported an error, retrying..." >&2
+			notify "Retrying upload" "puush.me reported an error for ${1##*/}."
 		fi
-
-		exit 1
-	fi
+	done
+	reply=${reply%%,*}
+	printf "puush.me reported error %s." "${reply:-(empty reply)}"
+	return 1
 }
 
-# $1: fileName (Required)
-# $2: delete after use (Not required. Default: false)
-function puushFile()
+# $1: file, $2: "tmp" to delete it once uploaded
+send()
 {
-	if [[ -z "$1" ]]; then
-		return
+	local out
+	if out=$(upload "$1"); then
+		[[ $2 == tmp ]] && rm -f -- "$1"
+		urls+=("$out")
+		((tty)) && echo "$out"
+	else
+		[[ $2 == tmp && -f $1 ]] && out+=" The screenshot is kept at $1."
+		fail "Upload failed" "${1##*/}: $out"
 	fi
-	
-	if ! [ -f "$1" -a -r "$1" ] ; then
-		printf "File '$1' is not a valid file or is not readable.\n"
-		return
-	fi
-	
-	if ! [ -t 1 ] ; then
-		notify-send "puush" "Uploading..." -t 1500 -i "/usr/share/pixmaps/puush.png"
-	fi
-
-	result=`curl "https://puush.me/api/up" -# -F "k=$PUUSH_API_KEY" -F "z=lulz" -F "f=@$1" | sed -E 's/^.+,(.+),.+,.+$/\1\n/'`
-
-	if [ "$2" = true ]; then
-	    /bin/rm "$1"
-	fi
-
-	printf "$result"
 }
 
-# Need help?
-function printHelp ()
+# Fill the arrays ids/dates/links/names with your last uploads, newest first
+# (puush.me returns up to 10)
+fetchHistory()
 {
-	printf "puush-linux by Jack'lul <www.jacklul.com>\n"
-	printf " GitHub: https://github.com/jacklul/puush-linux\n"
-	printf "\n"
-	printf "Usage:\n"
-	printf "  puush [OPTION] [FILE]\n"
-	printf "\n"
-	printf "OPTIONS:\n"
-	printf "  -d, --desktop		puush entire desktop\n"
-	printf "  -w, --window		puush current window\n"
-	printf "  -a, --area		select area to puush\n"
-	printf "  -f, --file		puush specific file (opens file dialog)\n"
-	printf "  -h, --help		shows this help\n"
-	printf "\n"
-	printf "FILE specifies path to file you want to upload, must be used\n without parameters.\n"
-	printf "\n"
+	local reply line id date url rest
+	reply=$(api hist) || die "Can't reach puush.me."
+	case $reply in
+		0|0$'\n'*) ;;
+		-1*) die "Invalid API key, run 'puush --login'." ;;
+		*) die "puush.me error: ${reply:-empty reply}" ;;
+	esac
+
+	# After the status line: id,date,url,filename,?,? (the name may contain commas)
+	ids=() dates=() links=() names=()
+	while IFS= read -r line; do
+		[[ -n $line ]] || continue
+		IFS=, read -r id date url rest <<<"$line"
+		ids+=("$id") dates+=("$date") links+=("$url") names+=("${rest%,*,*}")
+	done < <(tail -n +2 <<<"$reply")
 }
 
-###################
-# LETS BEGIN
+# $1: a thumbnail from puush.me (a PNG), $2: size in percent of its width, $3:
+# minimum rows. Draws it with chafa, padded with blank rows to fit the text beside it.
+drawThumb()
+{
+	local high low cols lines i
+	# The PNG's width is in bytes 16 to 19 (thumbnails fit in the last two)
+	read -r high low < <(od -An -tu1 -j 18 -N 2 "$1")
+	cols=$(((high * 256 + low) * $2 / 100))
+	((cols)) || return 1
+	mapfile -t lines < <(chafa --probe=off --format=symbols --colors=full --polite=on --animate=off --size="${cols}x$cols" "$1" 2>/dev/null)
+	((${#lines[@]})) || return 1
+	printf '%s\n' "${lines[@]}"
+	for ((i = ${#lines[@]}; i < $3; i++)); do printf '%*s\n' "$cols" ""; done
+}
 
-# Check for required commands
-checkDependency "scrot"
-checkDependency "curl"
-checkDependency "xclip"
-checkDependency "notify-send"
+# Keeps the cache under 10 MiB by deleting its oldest files
+pruneCache()
+{
+	local total=0 size file
+	find "$CACHE" -type f -printf '%T@ %s %p\n' | sort -rn | while read -r _ size file; do
+		((total += size, total > 10485760)) && rm -f -- "$file"
+	done
+}
 
-# Check for configuration, if it doesn't exist create it and ask user for API key
-if ! [ -f "$HOME/.config/puush/puush.conf" ] ; then
-	printf "Configuration file is missing, creating new one...\n"
-	
-	if mkdir -p $HOME/.config/puush/; then
-		if [ -t 1 ] ; then
-			printf "\n(You can find your API key at http://puush.me/account/settings)\n"
-			read -p "API key: " apikey
-			printf "\n"
-		fi
+# $1: how many uploads to show, $2: "numbered" to prefix them with 1), 2)...
+# Uses the arrays from fetchHistory. Thumbnails (drawn by chafa) only show in
+# a terminal.
+showHistory()
+{
+	local count=$1 thumbs=${PUUSH_THUMBS:-true} i r top head code bytes uploaded md5 thumb text
+	[[ $thumbs == true ]] && thumbs=16
+	((tty)) && command -v chafa >/dev/null || thumbs=false
 
-		printf "# puush-linux configuration file\n
-# API key (You can find your API key at http://puush.me/account/settings)
-PUUSH_API_KEY=$apikey
-\n" > $HOME/.config/puush/puush.conf
-		
-		. $HOME/.config/puush/puush.conf
-	else
-		exit 1
-	fi
-else
-	. $HOME/.config/puush/puush.conf
-fi
+	# Size and MD5 come from the links' headers (the files are not downloaded).
+	# Thumbnails are drawn as soon as they arrive, at least as tall as the 5
+	# lines of text beside them. Neither changes, so both are cached per upload.
+	mkdir -p "$CACHE" && tmp=$(mktemp -d) && trap 'rm -rf "$tmp"' EXIT || return 1
+	for ((i = 0; i < count; i++)); do
+		[[ -s $CACHE/${ids[i]}.head ]] || curl -sI --connect-timeout 15 -o /dev/null "${links[i]}" \
+			-w '%{http_code}\n%header{content-length}\n%header{etag}\n' >"$tmp/$i.head" &
+		[[ $thumbs == false || -s $CACHE/${ids[i]}-$thumbs ]] || {
+			api thumb -F "i=${ids[i]}" -o "$tmp/$i.png" 2>/dev/null &&
+				drawThumb "$tmp/$i.png" "$thumbs" 5 >"$tmp/$i.thumb" &&
+				mv -f "$tmp/$i.thumb" "$CACHE/${ids[i]}-$thumbs"
+		} &
+	done
+	wait
+	pruneCache
 
-# Handle empty API key or no parameter
-if [ -z "$PUUSH_API_KEY" ]; then
-	if [ -t 1 ] ; then
-		printf "Missing required configuration variable 'PUUSH_API_KEY'!\n"
-		printf "Please set it in '$HOME/.config/puush/puush.conf'.\n"
-	else
-		notify-send "Missing required configuration variable 'PUUSH_API_KEY'!" "Please set it in '$HOME/.config/puush/puush.conf'." -t 5000 -i "/usr/share/pixmaps/puush.png"
-	fi
-	exit 1
-elif [ -z "$1" ]; then
-	printf "Try 'puush --help' for usage informations.\n"
-	exit 1
-fi
-
-fileName="/tmp/$(date '+%Y%m%d%H%I%S').png"
-fileURL=""
-
-# Get file to puush and puush it
-case "$1" in
-	-d|--desktop|--d)
-			scrot "$fileName"	
-			if [ $? -eq 0 ]; then			
-				fileURL=`puushFile "$fileName" true`
-			else
-				exit 1
-			fi
-		;;
-	-w|--window|--w)
-			scrot -bu "$fileName"
-			if [ $? -eq 0 ]; then			
-				fileURL=`puushFile "$fileName" true`
-			else
-				exit 1
-			fi
-		;;
-	-a|--area|--a)
-			scrot -s "$fileName"
-			if [ $? -eq 0 ]; then
-				fileURL=`puushFile "$fileName" true`
-			else
-				exit 1
-			fi
-		;;
--f|--file|--f)
-		shift
-		if [ $# -eq 0 ] ; then
-			checkDependency "zenity"
-			fileName=`zenity --file-selection`
-			if ! [ -z "$fileName" ] ; then
-				fileURL=`puushFile "$fileName" false`
-			else
-				exit 1
-			fi
+	for ((i = 0; i < count; i++)); do
+		head=$CACHE/${ids[i]}.head
+		[[ -s $head ]] || head=$tmp/$i.head
+		{ read -r code; read -r bytes; read -r md5; } <"$head"
+		# The ETag is the file's MD5 for regular uploads
+		md5=${md5//\"/}
+		[[ $md5 =~ ^[0-9a-f]{32}$ ]] || md5="?"
+		if [[ $code == 200 && $bytes =~ ^[0-9]+$ ]]; then
+			# Only complete answers are cached
+			[[ $md5 != "?" && $head == "$tmp"/* ]] && cp -- "$head" "$CACHE/${ids[i]}.head"
+			bytes=$(numfmt --to=iec-i --suffix=B "$bytes")
 		else
-			while [ $# -gt 0 ] ; do
-				case "$1" in
-					-*) break ;;
-				esac
-				if ! [ -z "$1" ] ; then
-					fileURL=`puushFile "$1" false`
-					if printf "$fileURL" | grep -q "puu.sh"  ; then
-						printf $fileURL | xclip -selection "clipboard"
-						if [ -t 1 ] ; then
-							printf "$fileURL\n"
-						fi
-					else
-						if [ -t 1 ] ; then
-							printf "Error: $fileURL\n"
-						fi
-					fi
-				fi
-				shift
+			bytes="? (puu.sh returned ${code/#000/no answer})"
+		fi
+		uploaded=$(localTime "${dates[i]}Z") || uploaded="${dates[i]} GMT"
+		text=("${2:+$((i + 1))) }${links[i]}" "Filename: ${names[i]}" "Uploaded: $uploaded"
+			"Size:     $bytes" "MD5:      $md5")
+		thumb=()
+		[[ $thumbs != false && -s $CACHE/${ids[i]}-$thumbs ]] && mapfile -t thumb <"$CACHE/${ids[i]}-$thumbs"
+		if ((${#thumb[@]})); then
+			# The lines of text sit next to the middle of the thumbnail
+			top=$(( (${#thumb[@]} - ${#text[@]}) / 2 ))
+			for r in "${!thumb[@]}"; do
+				((r >= top && r < top + ${#text[@]})) && printf '%s  %s\n' "${thumb[r]}" "${text[r - top]}" ||
+					printf '%s\n' "${thumb[r]}"
 			done
-			exit 0
+		else
+			printf '%s\n' "${text[@]}" ""
 		fi
-	;;
-	-h|--help|--h)
-			printHelp
-			exit 1
+	done
+}
+
+# $1: how many recent uploads to show (default: 5, at most the 10 puush.me returns)
+listUploads()
+{
+	fetchHistory
+	local count=${1:-5}
+	showHistory $((count < ${#ids[@]} ? count : ${#ids[@]}))
+}
+
+# $1: a puu.sh link. Prints its upload id, which the link's code is in base 62.
+linkId()
+{
+	local code=${1#*://} digits=0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ id=0 i before
+	[[ $code == puu.sh/* ]] || return 1
+	code=${code#puu.sh/}
+	code=${code%%/*}
+	[[ $code =~ ^[0-9a-zA-Z]+$ ]] || return 1
+	for ((i = 0; i < ${#code}; i++)); do
+		before=${digits%%"${code:i:1}"*}
+		id=$((id * 62 + ${#before}))
+	done
+	echo "$id"
+}
+
+# $@: links, or numbers from the list of your last 5 uploads ("13" or "1 3");
+# without any, shows that list and asks
+deleteUploads()
+{
+	local targets=() picks seen arg id i c shown reply
+	for arg; do
+		if [[ $arg =~ ^[0-9,]+$ ]]; then
+			picks+=$arg
+		elif id=$(linkId "$arg"); then
+			targets+=("$id $arg")
+		else
+			fail "Delete failed" "$arg is neither a puu.sh link nor a number from 'puush -x'."
+		fi
+	done
+
+	if (($# == 0)) || [[ -n $picks ]]; then
+		fetchHistory
+		shown=$((${#ids[@]} < 5 ? ${#ids[@]} : 5))
+		if (($# == 0)); then
+			((tty)) || die "Run 'puush -x' in a terminal to pick uploads to delete."
+			((shown)) || { echo "No uploads to delete."; return; }
+			showHistory $shown numbered
+			read -rp "Delete which? (e.g. 13, Enter to cancel): " picks
+		fi
+		# Each digit is one upload, since the list never goes past 5
+		picks=${picks//[ ,]/}
+		for ((c = 0; c < ${#picks}; c++)); do
+			i=${picks:c:1}
+			((i >= 1 && i <= shown)) || die "'$i' is not in the list."
+			[[ $seen == *$i* ]] && continue
+			seen+=$i
+			targets+=("${ids[i - 1]} ${links[i - 1]}")
+		done
+	fi
+
+	# Each target is "<id> <link>"
+	for arg in "${targets[@]}"; do
+		reply=$(api del -F "i=${arg%% *}" -F z=poop)
+		if [[ $reply == 0* ]]; then
+			rm -f -- "$CACHE/${arg%% *}".head "$CACHE/${arg%% *}"-*
+			((tty)) && echo "Deleted ${arg#* }"
+			notify "Deleted" "${arg#* }"
+		else
+			fail "Delete failed" "puush.me refused to delete ${arg#* }."
+		fi
+	done
+}
+
+# $1: setting, $2: value (removes the setting when empty). The config is
+# created readable only by you, and deleted once empty.
+saveSetting()
+{
+	local rest=
+	[[ -f $CONF ]] && rest=$(grep -v "^$1=" "$CONF")
+	[[ -n $2 ]] && rest+=${rest:+$'\n'}$1=$(printf %q "$2")
+	if [[ -z $rest ]]; then
+		rm -f -- "$CONF"
+	else
+		mkdir -p "${CONF%/*}" && (umask 077; printf '%s\n' "$rest" >"$CONF")
+	fi || exit 1
+}
+
+# Log in with an email and password (or an API key) and save the API key
+login()
+{
+	((tty)) || die "Run 'puush --login' in a terminal to set up your account."
+	local user pass reply key
+	read -rp "puush.me email or API key: " user
+	[[ -n $user ]] || die "Nothing entered."
+
+	if [[ $user == *@* ]]; then
+		read -rsp "Password: " pass
+		echo
+		# The password goes through stdin so it never shows in the process list
+		reply=$(printf '%s' "$pass" | curl -sS --connect-timeout 15 https://puush.me/api/auth \
+			--form-string "e=$user" -F "p=<-") || die "Can't reach puush.me."
+	else
+		PUUSH_API_KEY=$user
+		reply=$(api auth) || die "Can't reach puush.me."
+	fi
+
+	# "<account type>,<api key>,<expiry>,<usage>" on success, -1 otherwise
+	IFS=, read -r _ key _ <<<"$reply"
+	if [[ $reply == -* || -z $key ]]; then
+		[[ $user == *@* ]] && die "Wrong email or password."
+		die "Invalid API key."
+	fi
+	saveSetting PUUSH_API_KEY "$key"
+	PUUSH_API_KEY=$key
+	echo "Logged in, API key saved to ${CONF/#$HOME/\~}."
+}
+
+# Forget the API key but keep the other settings
+logout()
+{
+	[[ -n $PUUSH_API_KEY ]] || { echo "Not logged in."; return; }
+	saveSetting PUUSH_API_KEY ""
+	echo "Logged out, API key removed."
+}
+
+# $1: option name, $2: its new value (shows the current value if missing)
+setOption()
+{
+	local var help="Use 'puush --option md5 true|false' or 'puush --option thumbs true|false|0|6-100'."
+	case $1 in
+		md5) var=PUUSH_MD5 ;;
+		thumbs) var=PUUSH_THUMBS ;;
+		*) die "$help" ;;
+	esac
+
+	if [[ -z $2 ]]; then
+		echo "$1 ${!var:-true}"
+		return
+	fi
+	# true or false, or for thumbs a size in percent (0 turns them off)
+	set -- "$1" "${2/#0/false}"
+	[[ $2 == true || $2 == false ]] ||
+		{ [[ $1 == thumbs && $2 =~ ^[0-9]+$ ]] && (($2 >= 6 && $2 <= 100)); } ||
+		die "$help"
+	saveSetting "$var" "$2"
+	echo "$1 $2"
+}
+
+installSelf()
+{
+	mkdir -p "${BIN%/*}" || exit 1
+	[[ $0 -ef $BIN ]] || cp -- "$0" "$BIN" || exit 1
+	chmod 755 "$BIN" && writeIcon || exit 1
+	echo "Installed $BIN"
+	[[ :$PATH: == *":${BIN%/*}:"* ]] || echo "${BIN%/*} is not in your PATH yet, log out and back in."
+
+	# Offer the optional packages that are missing
+	local missing=() why=() reply
+	command -v chafa >/dev/null || missing+=(chafa) why+=("chafa draws thumbnails in -h and -x")
+	command -v wl-copy >/dev/null || missing+=(wl-clipboard) why+=("wl-clipboard copies links")
+	((tty && ${#missing[@]})) || return 0
+	printf '%s.\n' "${why[@]}"
+	read -rp "Install ${missing[*]} with sudo apt? [Y/n] " reply
+	[[ $reply == [nN]* ]] || sudo apt install "${missing[@]}"
+}
+
+uninstallSelf()
+{
+	rm -rf -- "$BIN" "$ICON" "${CONF%/*}" "$CACHE" || exit 1
+	echo "Uninstalled puush, its icon, its cache and its settings (including your API key)."
+}
+
+usage()
+{
+	cat <<EOF
+puush - upload screenshots and files to puush.me
+
+Usage: puush OPTION
+       puush [-f] FILE...
+
+Capture:
+  -a, --all         pick an area, window or screen in GNOME's screenshot tool
+  -d, --desktop     screenshot the whole desktop at once
+
+Upload:
+  -f, --file FILE…  upload one or more files (-f is optional)
+  -z, --dialog      choose files to upload in a dialog
+
+History:
+  -h, --history [N] show your last N uploads (default: 5, max: 10)
+  -x, --delete      pick uploads to delete from your last 5
+  -x LINK|NUMBER…   delete uploads by link, or by their number in that list
+
+Setup:
+  -l, --login       log in with your puush.me email or API key
+      --logout      forget your API key (other settings are kept)
+  -o, --option md5 true|false
+                    send an MD5 checksum with uploads (default: true)
+  -o, --option thumbs true|false|6-100
+                    thumbnails in -h and -x (needs chafa), sized in percent
+                    of their 100 pixels (default: true = 16%; 0 or false: off)
+  -i, --install     install to ~/.local/bin for this user
+  -u, --uninstall   remove puush with its settings, API key and cache
+      --help        show this help
+EOF
+}
+
+case $1 in
+	--help) usage; exit ;;
+	-i|--install) installSelf; exit ;;
+	-u|--uninstall) uninstallSelf; exit ;;
+	"") usage; exit 1 ;;
+	-o|--option) setOption "$2" "$3"; exit ;;
+	--logout) logout; exit ;;
+	-l|--login) need curl; login; exit ;;
+	-f|--file) (($# > 1)) || die "No files given, use 'puush -z' to choose them in a dialog." ;;
+	-h|--history) [[ -z $2 || $2 =~ ^[1-9][0-9]*$ ]] || die "'$2' is not a number of uploads, try 'puush -h 3'." ;;
+	-a|--all|-d|--desktop|-z|--dialog|-x|--delete) ;;
+	-*) die "Unknown option '$1', see 'puush --help'." ;;
+esac
+
+need curl
+[[ -n $PUUSH_API_KEY ]] || login
+
+urls=()
+status=0
+
+case $1 in
+	-h|--history) listUploads "$2"; exit ;;
+	-x|--delete) shift; deleteUploads "$@"; exit $status ;;
+	-a|--all)
+		need gdbus
+		shot=$(pickShot) || die "Can't open GNOME's screenshot tool."
+		[[ -n $shot ]] && send "$shot" tmp
+		;;
+	-d|--desktop)
+		need gdbus
+		shot=$(desktopShot) || die "GNOME didn't take the screenshot."
+		send "$shot" tmp
+		;;
+	-z|--dialog)
+		need zenity
+		mapfile -t files < <(zenity --file-selection --multiple --separator=$'\n' --title=puush 2>/dev/null)
+		for file in "${files[@]}"; do send "$file"; done
 		;;
 	*)
-			fileName=$1
-			fileURL=`puushFile "$fileName" false`
+		[[ $1 == -f || $1 == --file ]] && shift
+		for file; do send "$file"; done
 		;;
 esac
 
-# Show results, copy link to clipboard if upload was successful, otherwise show error
-if printf "$fileURL" | grep -q "puu.sh"  ; then
-	printf $fileURL | xclip -selection "clipboard"
-	
-	if [ -t 1 ] ; then
-		printf "$fileURL\n"
+# Copy the links, then announce them all in one notification
+if ((${#urls[@]})); then
+	list=$(printf '%s\n' "${urls[@]}")
+	if wl-copy --trim-newline <<<"$list" 2>/dev/null; then
+		notify "Uploaded" "$list"$'\n'"Copied to the clipboard."
 	else
-		notify-send "puush complete!" "$fileURL" -t 3000 -i "/usr/share/pixmaps/puush.png"
-	fi
-else
-	if [ -t 1 ] ; then
-		printf "Error: $fileURL\n"
-	else
-		notify-send "puush error!" "$fileURL" -t 5000 -i "/usr/share/pixmaps/puush.png"
+		((tty)) && echo "(Install wl-clipboard to copy links automatically.)" >&2
+		notify "Uploaded" "$list"
 	fi
 fi
+
+exit $status
+
+#ICON
+#H4sIAAAAAAACA61XyW5kRRD8lVJzgUM9174g2wdOXJD4Bc9rb1J7PHKb8YivJyKyPCwjOCGrXW+p
+#yjUyMt/l+fO9+/J0+ni+Ojy8vn768eLi7e1te8vb88v9RQohXGDHwb09Hl8frg6ptoN7uH28f3hd
+#N58fb99+ev5ydQguODzh73B9eby9O19f7qfHT7/evD64x+PV4ebl9cPzzcvRxzFayz23BPmxt9oG
+#TnziPmz7BYIeIOQzfj+H3w8X15cX73JwaYK1+e7xdLo6fHz+eHv4l4P3jic9d18dfns5ff/dfxnx
+#w+Fvgr/rYQ9hmOzaXYp9G2P3yZet4Vf83IavW/Ixbu3kI57kLbuCq7anLfptuIIl8aFeJm7eoqs4
+#mLfuYsODvjU3ts7XDioKHkQXJy7GVh0PVNelcbiYtor35RyprW3FxaKNBVsqtkwXA2S2LcOCRptc
+#w4uMFwP3lRJlRHN8WvE24xg0Y4UCbJS9FSudiVhpccNaeI8bGJAcDa140S0GLvIExU+4ggUbk+1P
+#FEZwbDSTltAjrFAXeC01CAmkMQZ8N/AfmwJNomUwA+dpWqEcH6EmIv62Mv7c26A6mjSstOzrTdGK
+#6J1hN3KDdzBvxzPISHo1kaSKyMkKhbLI1wHncQZhxUaYgvg5LNisA7qI8mRIHXIpbxHlycAEZjvS
+#2xgYxq0qlgOiJQ0AQaSZMh8zPdAj5C771A1YHeZ1XxGZCWj5OokoxqMRK2UQC1SuK8UtKeldUB1b
+#YjH8FdojHmdYZVMikTiywA3JdBUYhgy6O2gMoOSYeIUAhipPhAX+eEUtxPMgKjIfNaIuERij8SUP
+#DJjoc1XAp8A3LHlCCxzuwgZ2O5reVDaNYXLY5hiWDEOSkDfooIwqyl+RPczClLGUlM/CMqIaPXCP
+#CtkREFQykOwJu9QUnu5y8kiqhFl2UBh+Q10YALUkyuPpzWoyURwxrTtaYqtlv8p+FGPzc7lHy2DQ
+#eIciJULHNB1TBJCUa8JT1aaypyuDsEl0Z6WWVcfSZOB5Dx5hdLxQT8STd2Sab1JecaAAGUgMnzP8
+#VThPSgeh2iwdLGrGIxI9coUFnFWGhikmo60E0agoS5sKZpBa5CBQJTZLjvEmL5FtzlBVxYCkLqf4
+#BTHOEPSpfIemVfhB4lRLVRSmJ1QUqV8lz4uuuBs70Sx61LTiNpCqCGkc7oTztwVxvL0Nd1YQiUwU
+#KyKEgqDDhCk5IFKKwl4VxK0sTwsznAUbupGcariInsmO5yJ4VJUIioFFUbRO5h1W7kWJb/Ajinin
+#AiuuFOc1VZpUMcPEiZIyrD8QmHkRZZOooaYBR7xlqUh4Up02OTWscKNiPRRyUQ8DjGj7QZrJdLR0
+#bWF2WaM58x140jQOgXIKY8Pymp/8YD0XVAj6CkLnVTQCqyFTDNwEEazntPwk+9c9LGeSGMBYvz15
+#nI3/q8SYmNIOwCWFZmgtqwAJ82TV/Kck3AvOq6Wj5v6JpbnfHWNfWArEEoJIco0rUEVhIsMzyax0
+#CCqCGZ8MlTpjHxhN0SkMgz3nxpwm9lC7KuKg6FWjSmVjERW9OX/tLnrTeTV2AoddScmdatGISRB+
+#kvX7KgB0P8nfmVelEgBsWEPPGKXBkhMEqpBT2K4omTqHkV/04pxorduLiL8tvuOHu9ub4+pGYA36
+#PSzPMJpTBQcYVb5EVQmaynNnnXOnmrJmqylGKqs0qtjQRigRFeco62DZuEWdQ85r/FF9mCwb6ZB2
+#jTgiWreIOqo+yTD8z7TFVfu4fpIAaN1tfkpqGjwk9hQ7l/eubhOdt0kxLX41OpEFZ/UcNQPy2c4O
+#w94xHVvYsKQ9RWsqmA5E0+gGAoN4j5MX/GJpdBug5DpgRSi7IR7lKFitGclYuW3TmgzTSj9JhmvY
+#ZQUyP0sTc63WmzUikJSLtCQNjEZhw4swGAomUC1McxtVexvM0EaVw6y4yErfFQY42tXS5q5mGBXB
+#ac6WhX4bZqf1V84SBIOMaIwdft2aiXtvM1Ipl4YaW5KDxf7jWdJ/6+xZ6GG4hnh5WDtkJsjvNiwE
+#cZP8MviF1Y6LTDYEoUKJK1Q+DaFnGj32tQ0+NOGpaX9XaIqoua45pJj7OEfSYPOtov6g/7aDjWD6
+#LvgyRcXGAXVVFEN7h8ZQtrOyjXu/OI/ReG/+718JUbPvdDbcay5sYsauOFYbmlbMw9LcNdywUToN
+#ucxEfYrFGKfsXys9NE4jBF9Uu6d8Wiwjh7fKzRr45iluISkhQ59dVclMSkM0NrJvDigVJIfGEvvi
+#4meJCJ/Un731ke5twEzCt7FH85oTrSwt34Q6hze3vpKcPsaE1aIhECSKO45Um4Zq60reJpOqz9p7
+#/PB1ff0HNVIcUoUPAAA=

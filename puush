@@ -4,6 +4,7 @@
 # itself a rewrite of Sunmock Yang's (https://github.com/sunmockyang/puush-linux).
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
+URL=https://raw.githubusercontent.com/lostallmymoney/Puush-Linux-CLI/main/puush
 BIN=~/.local/bin/puush
 ICON=~/.local/share/pixmaps/puush.svg
 CONF=~/.config/puush/puush.conf
@@ -330,7 +331,7 @@ saveSetting()
 login()
 {
 	((tty)) || die "Run 'puush --login' in a terminal to set up your account."
-	local user pass reply key
+	local user pass reply key old=$PUUSH_API_KEY
 	read -rp "puush.me email or API key: " user
 	[[ -n $user ]] || die "Nothing entered."
 
@@ -351,17 +352,20 @@ login()
 		[[ $user == *@* ]] && die "Wrong email or password."
 		die "Invalid API key."
 	fi
+	# Another account's cached uploads must not stay behind
+	[[ $key == "$old" ]] || rm -rf -- "$CACHE"
 	saveSetting PUUSH_API_KEY "$key"
 	PUUSH_API_KEY=$key
 	echo "Logged in, API key saved to ${CONF/#$HOME/\~}."
 }
 
-# Forget the API key but keep the other settings
+# Forget the API key and the cache of its uploads, but keep the other settings
 logout()
 {
+	rm -rf -- "$CACHE"
 	[[ -n $PUUSH_API_KEY ]] || { echo "Not logged in."; return; }
 	saveSetting PUUSH_API_KEY ""
-	echo "Logged out, API key removed."
+	echo "Logged out, API key and cache removed."
 }
 
 # $1: option name, $2: its new value (shows the current value if missing)
@@ -390,6 +394,14 @@ setOption()
 installSelf()
 {
 	mkdir -p "${BIN%/*}" || exit 1
+	# Piped into bash (curl ... | bash -s -- --install) there is no file to
+	# copy: download puush, then install from the download
+	if [[ ! -f $0 ]]; then
+		need curl
+		curl -fsSL "$URL" -o "$BIN.new" && mv -f -- "$BIN.new" "$BIN" && exec bash "$BIN" --install
+		rm -f -- "$BIN.new"
+		die "Can't download puush from $URL"
+	fi
 	[[ $0 -ef $BIN ]] || cp -- "$0" "$BIN" || exit 1
 	chmod 755 "$BIN" && writeIcon || exit 1
 	echo "Installed $BIN"
@@ -401,7 +413,8 @@ installSelf()
 	command -v wl-copy >/dev/null || missing+=(wl-clipboard) why+=("wl-clipboard copies links")
 	((tty && ${#missing[@]})) || return 0
 	printf '%s.\n' "${why[@]}"
-	read -rp "Install ${missing[*]} with sudo apt? [Y/n] " reply
+	# From the terminal, as stdin may be the pipe puush came through
+	read -rp "Install ${missing[*]} with sudo apt? [Y/n] " reply </dev/tty
 	[[ $reply == [nN]* ]] || sudo apt install "${missing[@]}"
 }
 
@@ -434,7 +447,7 @@ History:
 
 Setup:
   -l, --login       log in with your puush.me email or API key
-      --logout      forget your API key (other settings are kept)
+      --logout      forget your API key and cache (other settings are kept)
   -o, --option md5 true|false
                     send an MD5 checksum with uploads (default: true)
   -o, --option thumbs true|false|6-100

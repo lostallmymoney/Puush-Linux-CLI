@@ -7,13 +7,12 @@ A single bash script that uploads screenshots and files to
 ## Install
 
 ```sh
-git clone https://github.com/lostallmymoney/Puush-Linux-CLI
-cd Puush-Linux-CLI
-./puush --install
+curl -fsSL https://raw.githubusercontent.com/lostallmymoney/Puush-Linux-CLI/main/puush | bash -s -- --install
 ```
 
-This copies puush to `~/.local/bin` (no root needed), then offers to install
-the optional `chafa` and `wl-clipboard` if they are missing.
+This puts puush in `~/.local/bin` (no root needed), then offers to install the
+optional `chafa` and `wl-clipboard` if they are missing. From a clone,
+`./puush --install` does the same.
 
 The first run logs you in with your puush.me email and password (or an API key
 from <https://puush.me/account/settings>). Only the API key is saved, in
@@ -29,7 +28,7 @@ puush -z            choose files to upload in a dialog
 puush -h [N]        list your last N uploads (default 5, max 10)
 puush -x [LINK|N]   delete uploads by link or number (of your last 5), or pick
 puush -l            log in again (email + password, or API key)
-puush --logout      forget your API key (other settings are kept)
+puush --logout      forget your API key and cache (other settings are kept)
 puush -o md5 false  stop sending an MD5 checksum with uploads (on by default)
 puush -o thumbs 0   hide thumbnails in -h and -x (same as false)
 puush -o thumbs 50  thumbnail size in percent, 6-100 (default 16)

@@ -368,6 +368,34 @@ logout()
 	echo "Logged out, API key and cache removed."
 }
 
+# Prints how much storage is left. /api/auth returns
+# "<account type>,<api key>,<expiry>,<usage>" with usage in MiB; the official
+# client shows that as "%d/200mb" on free accounts and "%dmb" on pro.
+showSpace()
+{
+	local reply type key expiry usage remaining msg
+	reply=$(api auth) || die "Can't reach puush.me."
+	IFS=, read -r type key expiry usage _ <<<"$reply"
+	if [[ $reply == -* || -z $key ]]; then
+		die "Invalid API key, run 'puush --login'."
+	fi
+	[[ $type =~ ^[0-9]+$ && $usage =~ ^[0-9]+$ ]] ||
+		die "puush.me error: ${reply:-empty reply}"
+
+	if ((type > 0)) || [[ -n $expiry && $expiry != 0 ]]; then
+		msg="Used:  $usage MiB"$'\n'"Free:  unlimited (pro)"
+	else
+		remaining=$((200 - usage))
+		((remaining < 0)) && remaining=0
+		msg="Used:  $usage MiB / 200 MiB"
+	fi
+	if ((tty)); then
+		printf '%s\n' "$msg"
+	else
+		notify "puush space" "$msg"
+	fi
+}
+
 # $1: option name, $2: its new value (shows the current value if missing)
 setOption()
 {
@@ -444,6 +472,7 @@ History:
   -h, --history [N] show your last N uploads (default: 5, max: 10)
   -x, --delete      pick uploads to delete from your last 5
   -x LINK|NUMBER…   delete uploads by link, or by their number in that list
+  -s, --space       show how much puush storage you have left
 
 Setup:
   -l, --login       log in with your puush.me email or API key
@@ -469,7 +498,7 @@ case $1 in
 	-l|--login) need curl; login; exit ;;
 	-f|--file) (($# > 1)) || die "No files given, use 'puush -z' to choose them in a dialog." ;;
 	-h|--history) [[ -z $2 || $2 =~ ^[1-9][0-9]*$ ]] || die "'$2' is not a number of uploads, try 'puush -h 3'." ;;
-	-a|--all|-d|--desktop|-z|--dialog|-x|--delete) ;;
+	-a|--all|-d|--desktop|-z|--dialog|-x|--delete|-s|--space) ;;
 	-*) die "Unknown option '$1', see 'puush --help'." ;;
 esac
 
@@ -481,6 +510,7 @@ status=0
 
 case $1 in
 	-h|--history) listUploads "$2"; exit ;;
+	-s|--space) showSpace; exit ;;
 	-x|--delete) shift; deleteUploads "$@"; exit $status ;;
 	-a|--all)
 		need gdbus
@@ -503,10 +533,14 @@ case $1 in
 		;;
 esac
 
-# Copy the links, then announce them all in one notification
+# Copy the links, then announce them all in one notification. wl-copy keeps
+# running in the background to serve the clipboard, so the test is --help,
+# which returns at once without touching the Wayland server; the copy itself
+# writes nothing to stdout, which is redirected so its daemon can't pin it.
 if ((${#urls[@]})); then
 	list=$(printf '%s\n' "${urls[@]}")
-	if wl-copy --trim-newline <<<"$list" 2>/dev/null; then
+	if command -v wl-copy >/dev/null && wl-copy --help >/dev/null 2>&1; then
+		wl-copy --trim-newline <<<"$list" >/dev/null 2>&1
 		notify "Uploaded" "$list"$'\n'"Copied to the clipboard."
 	else
 		((tty)) && echo "(Install wl-clipboard to copy links automatically.)" >&2

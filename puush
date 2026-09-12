@@ -539,8 +539,7 @@ esac
 # writes nothing to stdout, which is redirected so its daemon can't pin it.
 if ((${#urls[@]})); then
 	list=$(printf '%s\n' "${urls[@]}")
-	if command -v wl-copy >/dev/null && wl-copy --help >/dev/null 2>&1; then
-		wl-copy --trim-newline <<<"$list" >/dev/null 2>&1
+	if wl-copy --trim-newline <<<"$list" 2>/dev/null; then
 		notify "Uploaded" "$list"$'\n'"Copied to the clipboard."
 	else
 		((tty)) && echo "(Install wl-clipboard to copy links automatically.)" >&2

@@ -21,13 +21,16 @@ notify()
 {
 	command -v notify-send >/dev/null || return 0
 	[[ -s $ICON ]] || writeIcon
-	notify-send -a puush -h string:desktop-entry:puush -i "$ICON" "$1" "$2"
+	local dur=${PUUSH_NOTIF_DURATION:-4} args=(-a puush -h string:desktop-entry:puush -i "$ICON")
+	# Expire the notification after notif_duration seconds; 0 keeps it up
+	[[ $dur =~ ^[0-9]+$ ]] && ((dur > 0)) && args+=(-t "$((dur * 1000))")
+	notify-send "${args[@]}" "$1" "$2"
 }
 
-# The puush logo, stored gzipped and base64-encoded in comments at the end of this script
+# The puush logo, gzipped in comments at the end of this script
 writeIcon()
 {
-	mkdir -p "${ICON%/*}" && sed '1,/^#ICON$/d; s/^#//' "$0" | base64 -d | gunzip >"$ICON"
+	mkdir -p "${ICON%/*}" && sed '1,/^#ICON$/d; s/^#//' "$0" | gunzip >"$ICON"
 }
 
 # $1: title, $2: message. A failed upload or delete: printed and notified,
@@ -399,22 +402,27 @@ showSpace()
 # $1: option name, $2: its new value (shows the current value if missing)
 setOption()
 {
-	local var help="Use 'puush --option md5 true|false' or 'puush --option thumbs true|false|0|6-100'."
+	local var default help="Use 'puush --option md5 true|false', 'puush --option thumbs true|false|0|6-100' or 'puush --option notif_duration SECONDS'."
 	case $1 in
-		md5) var=PUUSH_MD5 ;;
-		thumbs) var=PUUSH_THUMBS ;;
+		md5) var=PUUSH_MD5; default=true ;;
+		thumbs) var=PUUSH_THUMBS; default=true ;;
+		notif_duration) var=PUUSH_NOTIF_DURATION; default=4 ;;
 		*) die "$help" ;;
 	esac
 
 	if [[ -z $2 ]]; then
-		echo "$1 ${!var:-true}"
+		echo "$1 ${!var:-$default}"
 		return
 	fi
 	# true or false, or for thumbs a size in percent (0 turns them off)
-	set -- "$1" "${2/#0/false}"
-	[[ $2 == true || $2 == false ]] ||
-		{ [[ $1 == thumbs && $2 =~ ^[0-9]+$ ]] && (($2 >= 6 && $2 <= 100)); } ||
-		die "$help"
+	if [[ $1 == notif_duration ]]; then
+		[[ $2 =~ ^[0-9]+$ ]] || die "$help"
+	else
+		set -- "$1" "${2/#0/false}"
+		[[ $2 == true || $2 == false ]] ||
+			{ [[ $1 == thumbs && $2 =~ ^[0-9]+$ ]] && (($2 >= 6 && $2 <= 100)); } ||
+			die "$help"
+	fi
 	saveSetting "$var" "$2"
 	echo "$1 $2"
 }
@@ -482,6 +490,8 @@ Setup:
   -o, --option thumbs true|false|6-100
                     thumbnails in -h and -x (needs chafa), sized in percent
                     of their 100 pixels (default: true = 16%; 0 or false: off)
+  -o, --option notif_duration SECONDS
+                    dismiss notifications after SECONDS (default: 4; 0 = never)
   -i, --install     install to ~/.local/bin for this user
   -u, --uninstall   remove puush with its settings, API key and cache
       --help        show this help
@@ -550,35 +560,13 @@ fi
 exit $status
 
 #ICON
-#H4sIAAAAAAACA61XyW5kRRD8lVJzgUM9174g2wdOXJD4Bc9rb1J7PHKb8YivJyKyPCwjOCGrXW+p
-#yjUyMt/l+fO9+/J0+ni+Ojy8vn768eLi7e1te8vb88v9RQohXGDHwb09Hl8frg6ptoN7uH28f3hd
-#N58fb99+ev5ydQguODzh73B9eby9O19f7qfHT7/evD64x+PV4ebl9cPzzcvRxzFayz23BPmxt9oG
-#TnziPmz7BYIeIOQzfj+H3w8X15cX73JwaYK1+e7xdLo6fHz+eHv4l4P3jic9d18dfns5ff/dfxnx
-#w+Fvgr/rYQ9hmOzaXYp9G2P3yZet4Vf83IavW/Ixbu3kI57kLbuCq7anLfptuIIl8aFeJm7eoqs4
-#mLfuYsODvjU3ts7XDioKHkQXJy7GVh0PVNelcbiYtor35RyprW3FxaKNBVsqtkwXA2S2LcOCRptc
-#w4uMFwP3lRJlRHN8WvE24xg0Y4UCbJS9FSudiVhpccNaeI8bGJAcDa140S0GLvIExU+4ggUbk+1P
-#FEZwbDSTltAjrFAXeC01CAmkMQZ8N/AfmwJNomUwA+dpWqEcH6EmIv62Mv7c26A6mjSstOzrTdGK
-#6J1hN3KDdzBvxzPISHo1kaSKyMkKhbLI1wHncQZhxUaYgvg5LNisA7qI8mRIHXIpbxHlycAEZjvS
-#2xgYxq0qlgOiJQ0AQaSZMh8zPdAj5C771A1YHeZ1XxGZCWj5OokoxqMRK2UQC1SuK8UtKeldUB1b
-#YjH8FdojHmdYZVMikTiywA3JdBUYhgy6O2gMoOSYeIUAhipPhAX+eEUtxPMgKjIfNaIuERij8SUP
-#DJjoc1XAp8A3LHlCCxzuwgZ2O5reVDaNYXLY5hiWDEOSkDfooIwqyl+RPczClLGUlM/CMqIaPXCP
-#CtkREFQykOwJu9QUnu5y8kiqhFl2UBh+Q10YALUkyuPpzWoyURwxrTtaYqtlv8p+FGPzc7lHy2DQ
-#eIciJULHNB1TBJCUa8JT1aaypyuDsEl0Z6WWVcfSZOB5Dx5hdLxQT8STd2Sab1JecaAAGUgMnzP8
-#VThPSgeh2iwdLGrGIxI9coUFnFWGhikmo60E0agoS5sKZpBa5CBQJTZLjvEmL5FtzlBVxYCkLqf4
-#BTHOEPSpfIemVfhB4lRLVRSmJ1QUqV8lz4uuuBs70Sx61LTiNpCqCGkc7oTztwVxvL0Nd1YQiUwU
-#KyKEgqDDhCk5IFKKwl4VxK0sTwsznAUbupGcariInsmO5yJ4VJUIioFFUbRO5h1W7kWJb/Ajinin
-#AiuuFOc1VZpUMcPEiZIyrD8QmHkRZZOooaYBR7xlqUh4Up02OTWscKNiPRRyUQ8DjGj7QZrJdLR0
-#bWF2WaM58x140jQOgXIKY8Pymp/8YD0XVAj6CkLnVTQCqyFTDNwEEazntPwk+9c9LGeSGMBYvz15
-#nI3/q8SYmNIOwCWFZmgtqwAJ82TV/Kck3AvOq6Wj5v6JpbnfHWNfWArEEoJIco0rUEVhIsMzyax0
-#CCqCGZ8MlTpjHxhN0SkMgz3nxpwm9lC7KuKg6FWjSmVjERW9OX/tLnrTeTV2AoddScmdatGISRB+
-#kvX7KgB0P8nfmVelEgBsWEPPGKXBkhMEqpBT2K4omTqHkV/04pxorduLiL8tvuOHu9ub4+pGYA36
-#PSzPMJpTBQcYVb5EVQmaynNnnXOnmrJmqylGKqs0qtjQRigRFeco62DZuEWdQ85r/FF9mCwb6ZB2
-#jTgiWreIOqo+yTD8z7TFVfu4fpIAaN1tfkpqGjwk9hQ7l/eubhOdt0kxLX41OpEFZ/UcNQPy2c4O
-#w94xHVvYsKQ9RWsqmA5E0+gGAoN4j5MX/GJpdBug5DpgRSi7IR7lKFitGclYuW3TmgzTSj9JhmvY
-#ZQUyP0sTc63WmzUikJSLtCQNjEZhw4swGAomUC1McxtVexvM0EaVw6y4yErfFQY42tXS5q5mGBXB
-#ac6WhX4bZqf1V84SBIOMaIwdft2aiXtvM1Ipl4YaW5KDxf7jWdJ/6+xZ6GG4hnh5WDtkJsjvNiwE
-#cZP8MviF1Y6LTDYEoUKJK1Q+DaFnGj32tQ0+NOGpaX9XaIqoua45pJj7OEfSYPOtov6g/7aDjWD6
-#LvgyRcXGAXVVFEN7h8ZQtrOyjXu/OI/ReG/+718JUbPvdDbcay5sYsauOFYbmlbMw9LcNdywUToN
-#ucxEfYrFGKfsXys9NE4jBF9Uu6d8Wiwjh7fKzRr45iluISkhQ59dVclMSkM0NrJvDigVJIfGEvvi
-#4meJCJ/Un731ke5twEzCt7FH85oTrSwt34Q6hze3vpKcPsaE1aIhECSKO45Um4Zq60reJpOqz9p7
-#/PB1ff0HNVIcUoUPAAA=
+#‹     ­WÉndEü•RsC=×¾ ÛN\øÏkoR{<r›ñˆ¯'"²<,#8!«]o©Ê522ßåùó½ûòtúx¾:<¼¾~úñââíím{ËÛóËýE
+#!\`ÇÁ½=_®©¶ƒ{¸}¼x]7Ÿoß~zþru.8<áïp}y¼½;__î§ÇO¿Þ¼>¸ÇãÕáæåõÃóÍËÑÇ1ZË=·ù±·ÚN|â>lû‚ ä3~?‡ß×—ïrpi‚µùîñtº:||þx{ø—ƒ÷Ž'=w_~{9}ÿÝñÃáo‚¿ëaa˜ìÚ]Š}c÷É—­áWüÜ†¯[ò1níä#žä-»‚«¶§-úm¸‚%ñ¡^&nÞ¢«8˜·îbÃƒ¾57¶Î×*
+#D'.ÆVT×¥q¸˜¶Š÷å©­mÅÅ¢[*¶Ld¶-Ã‚F›\Ã‹Œ÷•eDs|Zñ6ã4c…l”½+‰XiqÃZx­xÑ-.òÅO¸‚“íOFpl4“–Ð#¬Px-5	¤1|7ð›M¢e0çiZ¡¡&"þ¶2þÜÛ :š4¬´ìëMÑŠèa7rƒw0oÇ3ÈHz5‘¤ŠÈÉ
+#…²È×çqaÅF˜‚ø9,Ø¬ºˆòdHr)oåÉÀf;ÒÛÆ­*–¢% A¤™23=Ð#ä.ûÔXæu_™	hù:‰(Æ£+eT®+Å-)é]P[b1üÚ#gXeS"‘8²ÀÉt†º;h ä˜x… †*O„þxE-Äó *25¢.£ñ%˜èsUÀ§À7,yBîÂv;šÞT6arØæ–C’7è Œ*Ê_‘=ÌÂ”±””ÏÂ2¢=p
+#ÙT2ì	»ÔžîròHª„YvP~C] µ$ÊãéÍj2Q1­;Zb«e¿Ê~cós¹GË`Ðx‡"%BÇ4S”kÂSÕ¦²§+ƒ°Itg¥–UÇÒdàyat¼POÄ“wdšoR^q  HŸ3üU8OJ¡Ú,,jÆ#=r…œU††)&£­Ñ¨(K›
+#fZä P%6KŽñ&/‘mÎPUÅ€¤.§ø1Îô©|‡¦UøAâTKU¦'T©_%Ï‹®¸;Ñ,zÔ´â6ªiî„ó·q¼½wV‰L+"„‚ Ã„)9 RŠÂ^Ä­,O3œº‘œj¸ˆžÉŽç"xT•ŠEQ´NæVîE‰oð#Šx§+®ç5UšT1ÃÄ‰’2¬?˜ye“¨¡¦G¼e©HxR695¬p£b=rQŒhûAšÉt´tmavY£9óxÒ4r
+#cÃòšŸü`=Tú
+#BçU4«!SÜ¬ç´ü$û×=,g’ÀX¿=yœÿ«Ä˜˜ÒÀ%…fh-« 	ódÕü§$ÜÎ«¥£æþ‰¥¹ßc_X
+#Ä‚Hr+PEa"Ã3É¬t*‚Ÿ•:cMÑ)ƒ=çÆœ&öP»*â èU£Jec½9í.zÓy5v‡]IÉjÑˆI~’õû* t?Éß™W¥ lXCÏ¥Á’ªSØ®(™:‡‘_ôâœh­Û‹ˆ¿-¾ã‡»Û›ãêF`ú=,Ï0šSU¾DU	šÊsgs§š²f«)F*«4ªØÐF(ç(ë`Ù¸ECÎküQ}˜,év8"Z·ˆ:ª>É0üÏ´ÅUû¸~’ hÝm~Jj<$ö;—÷®n·I1-~5:‘gõ5òÙÎÃÞ1[Ø°¤=Ek*˜DÓèƒx“übit ä:`E(»!å(X­ÉX¹mÓšÓJ?I†kØe2?Ks­Ö›5"”‹´$ŒFaÃ‹0
+#&P-LsU{ÌÐF•Ã¬¸ÈJß8ÚÕÒæ®fÁiÎ–…~f§õWÎƒŒhŒ~Ýš‰{o3R)—†[’ƒÅþãYÒëìYèa¸†xyX;d&Èï6,q“ü2ø…ÕŽ‹L6¡B‰+T>¡g=öµ>4á©iWhŠ¨¹®9¤˜û8GÒ`ó­¢þ ÿ¶ƒ`ú.ø2EÅÆuUC{‡ÆP¶³²{¿8Ñxoþï_	Q³ït6Ük.lbÆ®8VšVÌÃÒÜ5Ü°Q:¹ÌD}ŠÅ§ì_+=4N#_T»§|Z,#‡·ÊÍøæ)n!)!CŸ]UÉLJC46²o($‡Æûââg‰ŸÔŸ½õ‘îmÀLÂ·±Góš­,-ß„:‡7·¾’œ>Æ„Õ¢!$Š;ŽT›†jëJÞ&“ªÏÚ{üðu}ý5RR…  

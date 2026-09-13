@@ -32,12 +32,15 @@ puush --logout      forget your API key and cache (other settings are kept)
 puush -o md5 false  stop sending an MD5 checksum with uploads (on by default)
 puush -o thumbs 0   hide thumbnails in -h and -x (same as false)
 puush -o thumbs 50  thumbnail size in percent, 6-100 (default 16)
+puush -o notif_duration 9
+                    dismiss notifications after 9 seconds (default 4; 0 = never)
 puush -u            uninstall, including settings, API key and cache
 ```
 
 Links are printed in a terminal, copied to the clipboard and shown in a
-notification. Screenshots are deleted once uploaded, and kept if the upload
-fails.
+notification, which dismisses itself after 4 seconds by default (`puush -o
+notif_duration SECONDS` to change it, `0` keeps it up). Screenshots are
+deleted once uploaded, and kept if the upload fails.
 
 Uploads include an MD5 checksum so puush.me can reject a corrupted transfer; a
 failed upload is retried once automatically.

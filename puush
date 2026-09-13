@@ -21,16 +21,18 @@ notify()
 {
 	command -v notify-send >/dev/null || return 0
 	[[ -s $ICON ]] || writeIcon
-	local dur=${PUUSH_NOTIF_DURATION:-4} args=(-a puush -h string:desktop-entry:puush -i "$ICON")
+	local transient=${PUUSH_NOTIF_TRANSIENT:-true} dur=${PUUSH_NOTIF_DURATION:-4} args=(-a puush -h string:desktop-entry:puush -i "$ICON")
+	# Transient notifications bypass the server's persistence
+	[[ $transient == true ]] && args+=(-e)
 	# Expire the notification after notif_duration seconds; 0 keeps it up
 	[[ $dur =~ ^[0-9]+$ ]] && ((dur > 0)) && args+=(-t "$((dur * 1000))")
 	notify-send "${args[@]}" "$1" "$2"
 }
 
-# The puush logo, gzipped in comments at the end of this script
+# The puush logo, stored gzipped and base64-encoded in comments at the end of this script
 writeIcon()
 {
-	mkdir -p "${ICON%/*}" && sed '1,/^#ICON$/d; s/^#//' "$0" | gunzip >"$ICON"
+	mkdir -p "${ICON%/*}" && sed '1,/^#ICON$/d; s/^#//' "$0" | base64 -d | gunzip >"$ICON"
 }
 
 # $1: title, $2: message. A failed upload or delete: printed and notified,
@@ -402,11 +404,12 @@ showSpace()
 # $1: option name, $2: its new value (shows the current value if missing)
 setOption()
 {
-	local var default help="Use 'puush --option md5 true|false', 'puush --option thumbs true|false|0|6-100' or 'puush --option notif_duration SECONDS'."
+	local var default help="Use 'puush --option md5 true|false', 'puush --option thumbs true|false|0|6-100', 'puush --option notif_duration SECONDS' or 'puush --option notif_transient true|false'."
 	case $1 in
 		md5) var=PUUSH_MD5; default=true ;;
 		thumbs) var=PUUSH_THUMBS; default=true ;;
 		notif_duration) var=PUUSH_NOTIF_DURATION; default=4 ;;
+		notif_transient) var=PUUSH_NOTIF_TRANSIENT; default=true ;;
 		*) die "$help" ;;
 	esac
 
@@ -492,6 +495,9 @@ Setup:
                     of their 100 pixels (default: true = 16%; 0 or false: off)
   -o, --option notif_duration SECONDS
                     dismiss notifications after SECONDS (default: 4; 0 = never)
+  -o, --option notif_transient true|false
+                    transient notifications, which the server doesn't keep
+                    (default: true)
   -i, --install     install to ~/.local/bin for this user
   -u, --uninstall   remove puush with its settings, API key and cache
       --help        show this help
@@ -560,13 +566,35 @@ fi
 exit $status
 
 #ICON
-#ã     ≠W…ndE¸ïRsÅC=◊æ €N\ê¯œkoR{<rõÒàØ'"≤<,#8!´]o© 522ﬂÂ˘ÛΩ˚Út˙xæ:<ºæ~˙Ò‚‚ÌÌm{À€ÛÀ˝E
-#!\`«¡Ω=_Æ©∂É{∏}ºx]7üoﬂ~z˛ru.8<·Ôp}yºΩ;__Óß«Oøﬁº>∏«„’·ÊÂı√ÛÕÀ—«1ZÀ=∑˘±∑⁄N|‚>l˚Ç ‰3~?áﬂ◊óÔrpiÇµ˘ÓÒt∫:||˛x{¯óÉ˜é'=w_~{9}ˇ›Ò√·oÇøÎaaòÏ⁄]ä}c˜…ó≠·W¸‹ÜØ[Ú1nÌ‰#û‰-ªÇ´∂ß-˙m∏Ç%Ò°^&nﬁ¢´8ò∑Ób√Éæ57∂Œ◊*
-#D'.∆VT◊•q∏ò∂ä˜Â©≠m≈≈¢ç[*∂Ld∂-√ÇFõ\√ãå˜ïeDs|ZÒ6„4cÖlîΩ+ùâXiq√Zxèê≠x—-.Ú≈O∏ÇìÌOFpl4ìñ–#¨Px-5	§1|7õM¢e0ÁiZ°°&"˛∂2˛‹€†:ö4¨¥ÏÎM—äËùa7rÉw0o«3»Hz5ë§ä»…
-#Ö≤»◊Áqa≈FòÇ¯9,ÿ¨∫àÚdHr)oÂ…¿f;“€∆≠*ñ¢% A§ô23=–#‰.˚‘XÊu_ô	h˘:â(∆£+eTÆ+≈-)È]P[b1¸⁄#gXeS"ë8≤¿…tÜ∫;h†‰òxÖ Ü*OÑ˛xE-ƒÛ *25¢.£Ò%òËsU¿ß¿7,yBÓ¬v;öﬁT6çarÿÊñCíê7Ë†å* _ë=Ã¬î±îîœ¬2¢=pè
-#ŸT2êÏ	ª‘ûÓrÚH™ÑYvP~C] µ$ „ÈÕj2Q1≠;Zb´eø ~cÛsπGÀ`–xá"%B«4Sêîk¬S’¶≤ß+É∞Itg•ñU«“d‡yatºPOƒìwdöoR^q† Hü3¸U8OJ°⁄,,j∆#=rÖúUÜÜ)&£≠—®(Kõ
-#fêZ‰ P%6KéÒ&/ëmŒPU≈Ä§.ß¯1ŒÙ©|á¶U¯A‚TKU¶'T©_%œãÆ∏;—,z‘¥‚6ê™iÓÑÛ∑qºΩwVâL+"ÑÇ†√Ñ)9 Rä¬^ƒ≠,O3ú∫ëúj∏àû…éÁ"xTïäÅEQ¥NÊVÓEâo#äxß+ÆÁ5UöT1√ƒâí2¨?òyeì®°¶Gºe©HxRù695¨p£b=rQåh˚Aö…t¥tmavY£9Ûx“4År
-#c√Úöü¸`=T˙
-#BÁU4´!S‹¨Á¥¸$˚◊=,gí¿Xø=yúçˇ´ƒòò“¿%Öfh-´ 	Ûd’¸ß$‹Œ´•£Ê˛â•πﬂc_X
-#ƒÇHrç+PEa"√3…¨t*Çüï:cM—)É=Á∆ú&ˆPª*‚†ËU£JecΩ9Ì.z”y5vá]I…ùj—àI~íı˚* t?…ﬂôW• lXCœ•¡í™êSÿÆ(ô:áë_Ù‚úh≠€ãàø-æ„áª€õ„ÍF`˙=,œ0öSUæDU	ö sgùsßö≤f´)F*´4™ÿ–F(Á(Î`Ÿ∏EùCŒk¸Q}ò,Èêvç8"Z∑à:™>…0¸œ¥≈U˚∏~í h›m~Jj<$ˆ;ó˜Ænù∑I1-~5:ëgı5ÚŸŒ√ﬁ1[ÿ∞§=Ek*òD”ËÉxèì¸bit†‰:`E(ª!Â(X≠…Xπm”ö”J?IÜkÿe2?Ks≠÷õ5"êîã¥$åFa√ã0
-#&P-LsU{Ã–Fï√¨∏»Jﬂ8⁄’“ÊÆf¡iŒñÖ~fßıWŒÉåhå~›öâ{o3R)óÜ[íÉ≈˛„Y“ÎÏYËa∏ÜxyX;d&»Ô6,qì¸2¯Ö’éãL6°Bâ+T>°g=ˆµ>4·©iWhä®πÆ9§ò˚8G“`Û≠¢˛†ˇ∂Éç`˙.¯2E≈∆uUC{á∆P∂≥≤ç{ø8è—xo˛Ô_	Q≥Ôt6‹k.lb∆Æ8VöVÃ√“‹5‹∞Q:πÃD}ä≈ßÏ_+=4N#_Tªß|Z,#á∑ Õ¯Ê)n!)!Cü]U…LJC46≤o($á∆˚‚‚gâü‘üΩıëÓm¿L¬∑±GÛö≠,-ﬂÑ:á7∑æíú>∆Ñ’¢!$ä;éTõÜjÎJﬁ&ì™œ⁄{¸u}˝5RRÖ  
+#H4sIAAAAAAACA61XyW5kRRD8lVJzgUM9174g2wdOXJD4Bc9rb1J7PHKb8YivJyKyPCwjOCGrXW+p
+#yjUyMt/l+fO9+/J0+ni+Ojy8vn768eLi7e1te8vb88v9RQohXGDHwb09Hl8frg6ptoN7uH28f3hd
+#N58fb99+ev5ydQguODzh73B9eby9O19f7qfHT7/evD64x+PV4ebl9cPzzcvRxzFayz23BPmxt9oG
+#TnziPmz7BYIeIOQzfj+H3w8X15cX73JwaYK1+e7xdLo6fHz+eHv4l4P3jic9d18dfns5ff/dfxnx
+#w+Fvgr/rYQ9hmOzaXYp9G2P3yZet4Vf83IavW/Ixbu3kI57kLbuCq7anLfptuIIl8aFeJm7eoqs4
+#mLfuYsODvjU3ts7XDioKHkQXJy7GVh0PVNelcbiYtor35RyprW3FxaKNBVsqtkwXA2S2LcOCRptc
+#w4uMFwP3lRJlRHN8WvE24xg0Y4UCbJS9FSudiVhpccNaeI8bGJAcDa140S0GLvIExU+4ggUbk+1P
+#FEZwbDSTltAjrFAXeC01CAmkMQZ8N/AfmwJNomUwA+dpWqEcH6EmIv62Mv7c26A6mjSstOzrTdGK
+#6J1hN3KDdzBvxzPISHo1kaSKyMkKhbLI1wHncQZhxUaYgvg5LNisA7qI8mRIHXIpbxHlycAEZjvS
+#2xgYxq0qlgOiJQ0AQaSZMh8zPdAj5C771A1YHeZ1XxGZCWj5OokoxqMRK2UQC1SuK8UtKeldUB1b
+#YjH8FdojHmdYZVMikTiywA3JdBUYhgy6O2gMoOSYeIUAhipPhAX+eEUtxPMgKjIfNaIuERij8SUP
+#DJjoc1XAp8A3LHlCCxzuwgZ2O5reVDaNYXLY5hiWDEOSkDfooIwqyl+RPczClLGUlM/CMqIaPXCP
+#CtkREFQykOwJu9QUnu5y8kiqhFl2UBh+Q10YALUkyuPpzWoyURwxrTtaYqtlv8p+FGPzc7lHy2DQ
+#eIciJULHNB1TBJCUa8JT1aaypyuDsEl0Z6WWVcfSZOB5Dx5hdLxQT8STd2Sab1JecaAAGUgMnzP8
+#VThPSgeh2iwdLGrGIxI9coUFnFWGhikmo60E0agoS5sKZpBa5CBQJTZLjvEmL5FtzlBVxYCkLqf4
+#BTHOEPSpfIemVfhB4lRLVRSmJ1QUqV8lz4uuuBs70Sx61LTiNpCqCGkc7oTztwVxvL0Nd1YQiUwU
+#KyKEgqDDhCk5IFKKwl4VxK0sTwsznAUbupGcariInsmO5yJ4VJUIioFFUbRO5h1W7kWJb/Ajinin
+#AiuuFOc1VZpUMcPEiZIyrD8QmHkRZZOooaYBR7xlqUh4Up02OTWscKNiPRRyUQ8DjGj7QZrJdLR0
+#bWF2WaM58x140jQOgXIKY8Pymp/8YD0XVAj6CkLnVTQCqyFTDNwEEazntPwk+9c9LGeSGMBYvz15
+#nI3/q8SYmNIOwCWFZmgtqwAJ82TV/Kck3AvOq6Wj5v6JpbnfHWNfWArEEoJIco0rUEVhIsMzyax0
+#CCqCGZ8MlTpjHxhN0SkMgz3nxpwm9lC7KuKg6FWjSmVjERW9OX/tLnrTeTV2AoddScmdatGISRB+
+#kvX7KgB0P8nfmVelEgBsWEPPGKXBkhMEqpBT2K4omTqHkV/04pxorduLiL8tvuOHu9ub4+pGYA36
+#PSzPMJpTBQcYVb5EVQmaynNnnXOnmrJmqylGKqs0qtjQRigRFeco62DZuEWdQ85r/FF9mCwb6ZB2
+#jTgiWreIOqo+yTD8z7TFVfu4fpIAaN1tfkpqGjwk9hQ7l/eubhOdt0kxLX41OpEFZ/UcNQPy2c4O
+#w94xHVvYsKQ9RWsqmA5E0+gGAoN4j5MX/GJpdBug5DpgRSi7IR7lKFitGclYuW3TmgzTSj9JhmvY
+#ZQUyP0sTc63WmzUikJSLtCQNjEZhw4swGAomUC1McxtVexvM0EaVw6y4yErfFQY42tXS5q5mGBXB
+#ac6WhX4bZqf1V84SBIOMaIwdft2aiXtvM1Ipl4YaW5KDxf7jWdJ/6+xZ6GG4hnh5WDtkJsjvNiwE
+#cZP8MviF1Y6LTDYEoUKJK1Q+DaFnGj32tQ0+NOGpaX9XaIqoua45pJj7OEfSYPOtov6g/7aDjWD6
+#LvgyRcXGAXVVFEN7h8ZQtrOyjXu/OI/ReG/+718JUbPvdDbcay5sYsauOFYbmlbMw9LcNdywUToN
+#ucxEfYrFGKfsXys9NE4jBF9Uu6d8Wiwjh7fKzRr45iluISkhQ59dVclMSkM0NrJvDigVJIfGEvvi
+#4meJCJ/Un731ke5twEzCt7FH85oTrSwt34Q6hze3vpKcPsaE1aIhECSKO45Um4Zq60reJpOqz9p7
+#/PB1ff0HNVIcUoUPAAA=

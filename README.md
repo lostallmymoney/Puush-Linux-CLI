@@ -42,7 +42,7 @@ fails.
 Uploads include an MD5 checksum so puush.me can reject a corrupted transfer; a
 failed upload is retried once automatically.
 
-`-h` lists your last 5 uploads (up to 10 with `-h 10`) with their name, upload
+`-h` lists your last 5 uploads (up to 10 with `-h 10`) (up to 10 from the api, rest from local cache) with their name, upload
 date, size and MD5, each with its puush.me thumbnail drawn in the terminal by
 `chafa` (without it, the list is text only). Thumbnails, sizes and MD5s are
 cached in `~/.cache/puush`, up to 10 MiB. `-x` picks uploads to delete from the
